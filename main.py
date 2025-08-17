@@ -3,14 +3,14 @@ import sys
 import random
 from pathlib import Path
 from typing import List, Dict
-
+from openai import OpenAI
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QMessageBox, QComboBox,
-    QCheckBox, QGroupBox, QRadioButton, QButtonGroup
+    QCheckBox, QGroupBox, QRadioButton, QButtonGroup, QInputDialog
 )
 from PyQt5.QtGui import QFont
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from models import Question
 from parser import parse_docx
@@ -199,12 +199,24 @@ class BrushApp(QMainWindow):
         self.btn_finish.clicked.connect(self.finish_practice)
         btn_row.addWidget(self.btn_finish)
 
+        self.btn_ai_analyze = QPushButton("AI智能分析题目")
+        self.btn_ai_analyze.setMinimumWidth(140)
+        self.btn_ai_analyze.clicked.connect(self.analyze_with_ai)
+        btn_row.addWidget(self.btn_ai_analyze)
+
         # ---------- 反馈 ----------
         self.lbl_feedback = QLabel("")
         self.lbl_feedback.setWordWrap(True)
         self.lbl_feedback.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.lbl_feedback.setMinimumHeight(40)
         main_layout.addWidget(self.lbl_feedback)
+
+        # ---------- AI 分析反馈 ----------
+        self.lbl_ai_feedback = QLabel("")
+        self.lbl_ai_feedback.setWordWrap(True)
+        self.lbl_ai_feedback.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.lbl_ai_feedback.setMinimumHeight(40)
+        main_layout.addWidget(self.lbl_ai_feedback)
 
     # -------------------------------------------------
     def _apply_style(self):
@@ -300,6 +312,7 @@ class BrushApp(QMainWindow):
         self.btn_next.setEnabled(False)
         self.btn_save_wrong.setEnabled(False)
         self.lbl_feedback.clear()
+        self.lbl_ai_feedback.clear()
         self.show_current_question()
 
     # -------------------------------------------------
@@ -329,6 +342,7 @@ class BrushApp(QMainWindow):
         self.btn_next.setEnabled(False)
         self.btn_save_wrong.setEnabled(False)
         self.lbl_feedback.clear()
+        self.lbl_ai_feedback.clear()
 
     # -------------------------------------------------
     # ---- 检查答案 ----
@@ -354,6 +368,7 @@ class BrushApp(QMainWindow):
             self.wrong_questions.append(q)
 
         self.lbl_feedback.setText(feedback)
+        self.lbl_ai_feedback.clear()
 
         # 按钮切换
         self.btn_submit.setEnabled(False)
@@ -417,11 +432,63 @@ class BrushApp(QMainWindow):
         self.lbl_progress.setText("")
         self.lbl_question.setText("")
         self.lbl_feedback.setText("")
+        self.lbl_ai_feedback.setText("")
         for rb in self.opt_radios:
             rb.hide()
         self.btn_submit.setEnabled(False)
         self.btn_next.setEnabled(False)
         self.btn_save_wrong.setEnabled(False)
+
+    # -------------------------------------------------
+    # ---- 调用AI大模型分析当前题目和选项 ----
+    def analyze_with_ai(self):
+        """调用AI大模型分析当前题目和选项（流式输出）"""
+        if not self.current_questions:
+            QMessageBox.information(self, "提示", "请先开始刷题！")
+            return
+        q = self.current_questions[self.current_index]
+        prompt = f"请分析以下选择题并给出解析：\n题目：{q.content}\n选项：{chr(10).join(q.options)}"
+        self.lbl_ai_feedback.setText("<span style='color:#7fb0e2;font-size:15pt'>大模型分析中</span><br><span id='ai_stream'></span>")
+        self._ai_loading_dots = 0
+        self._ai_loading_timer = QTimer(self)
+        self._ai_loading_timer.timeout.connect(self._update_ai_loading)
+        self._ai_loading_timer.start(500)
+        self._ai_stream_text = ""
+
+        import threading
+        def run_ai_stream():
+            try:
+                client = OpenAI(api_key="push your api key here", base_url="https://api.deepseek.com")
+                response = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    stream=True
+                )
+                # 流式输出处理
+                for chunk in response:
+                    if hasattr(chunk, "choices") and chunk.choices:
+                        delta = chunk.choices[0].delta.content if chunk.choices[0].delta else ""
+                        if delta:
+                            self._ai_stream_text += delta
+                            self._update_ai_stream_feedback()
+                self._ai_loading_timer.stop()
+                self.lbl_ai_feedback.setText(f"<span style='color:#7fb0e2;font-size:15pt'>大模型分析中</span><br><span style='color:#5a9bd4;font-size:15pt'>AI分析结果：</span><br>{self._ai_stream_text}")
+            except Exception as e:
+                self._ai_loading_timer.stop()
+                self.lbl_ai_feedback.setText(f"<span style='color:#d9534f;font-size:15pt'>AI分析失败：{e}</span>")
+        threading.Thread(target=run_ai_stream, daemon=True).start()
+
+    def _update_ai_stream_feedback(self):
+        # 实时更新AI流式输出内容
+        self.lbl_ai_feedback.setText(f"<span style='color:#7fb0e2;font-size:15pt'>大模型分析中{'.'*self._ai_loading_dots}</span><br><span style='color:#5a9bd4;font-size:15pt'>{self._ai_stream_text}</span>")
+
+    def _update_ai_loading(self):
+        self._ai_loading_dots = (self._ai_loading_dots + 1) % 4
+        # 只更新动画，不覆盖流式内容
+        self.lbl_ai_feedback.setText(f"<span style='color:#7fb0e2;font-size:15pt'>大模型分析中{'.'*self._ai_loading_dots}</span><br><span style='color:#5a9bd4;font-size:15pt'>{getattr(self, '_ai_stream_text', '')}</span>")
 
 def main():
     app = QApplication(sys.argv)
